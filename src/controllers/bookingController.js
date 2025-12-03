@@ -1,4 +1,4 @@
-const Booking = require("../models/Booking");
+const User = require("../models/user");
 
 const estimatePrice = ({ vehicleType }) => {
   const base = 50;
