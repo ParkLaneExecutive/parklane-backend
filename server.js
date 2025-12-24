@@ -1,5 +1,3 @@
-cd /Users/davidstevenson/Desktop/ParkLane/Chauffeur-Backend
-cat > server.js <<'EOF'
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -147,4 +145,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Chauffeur backend running on port ${PORT}`);
 });
-EOF
+
