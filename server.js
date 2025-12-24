@@ -1,4 +1,5 @@
-// server.js
+cd /Users/davidstevenson/Desktop/ParkLane/Chauffeur-Backend
+cat > server.js <<'EOF'
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
@@ -7,93 +8,113 @@ const path = require("path");
 
 const app = express();
 
-// -------------------- Middleware --------------------
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "1mb" }));
 
-// -------------------- Health check --------------------
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
-});
+const PRICING = {
+  currency: "GBP",
+  minimumFare: { Business: 70, First: 120, XL: 95 },
+  baseFee: { Business: 25, First: 40, XL: 32 },
+  perKm: { Business: 2.4, First: 3.6, XL: 3.0 },
+  perMin: { Business: 0.35, First: 0.55, XL: 0.45 },
+  meetGreetFee: 12,
+  airportPickupFee: 10,
+  extraStopFee: 8,
+  childSeatFee: 10,
+};
 
-// -------------------- QUOTE ENDPOINT --------------------
-// POST /quote
-// body: { tier: "Business" | "First" | "XL", passengers: number, luggage?: number }
+function clampNumber(n, min, max, fallback) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+function roundGBP(n) {
+  return Math.round(n);
+}
+
+app.get("/health", (_req, res) => res.json({ ok: true }));
+
 app.post("/quote", (req, res) => {
-  const { tier, passengers, luggage } = req.body || {};
+  const b = req.body || {};
+  const tier = b.tier;
 
-  if (!tier || typeof passengers !== "number") {
-    return res.status(400).json({
-      error: "Missing fields",
-      expected: {
-        tier: "Business | First | XL",
-        passengers: "number",
-        luggage: "number (optional)",
-      },
-    });
+  if (!tier || !["Business", "First", "XL"].includes(tier)) {
+    return res.status(400).json({ error: "Invalid tier", allowed: ["Business", "First", "XL"] });
   }
 
-  const pax = Math.max(1, Math.min(6, passengers));
-  const bags = Math.max(0, Math.min(8, typeof luggage === "number" ? luggage : 0));
+  const passengers = clampNumber(b.passengers, 1, 6, 1);
+  const luggage = clampNumber(b.luggage, 0, 8, 0);
 
-  let base;
-  if (tier === "Business") base = 85;
-  else if (tier === "First") base = 140;
-  else if (tier === "XL") base = 110;
-  else {
-    return res.status(400).json({
-      error: "Invalid tier",
-      allowed: ["Business", "First", "XL"],
-    });
-  }
+  const distanceKm = clampNumber(b.distanceKm, 1, 500, 12);
+  const durationMin = clampNumber(b.durationMin, 5, 600, 25);
+  const extraStops = clampNumber(b.extraStops, 0, 10, 0);
+  const childSeats = clampNumber(b.childSeats, 0, 4, 0);
+  const meetGreet = !!b.meetGreet;
+  const airportPickup = !!b.airportPickup;
 
-  const add = Math.min(4, pax - 1) * 8 + Math.min(6, bags) * 3;
-  const quote = base + add;
+  const paxFactor = 1 + Math.max(0, passengers - 1) * 0.06;
+  const bagFactor = 1 + Math.max(0, luggage - 1) * 0.03;
 
-  res.json({ quote });
+  const base = PRICING.baseFee[tier];
+  const distancePart = distanceKm * PRICING.perKm[tier];
+  const timePart = durationMin * PRICING.perMin[tier];
+
+  const extras =
+    (meetGreet ? PRICING.meetGreetFee : 0) +
+    (airportPickup ? PRICING.airportPickupFee : 0) +
+    extraStops * PRICING.extraStopFee +
+    childSeats * PRICING.childSeatFee;
+
+  const raw = base + distancePart + timePart + extras;
+  const factored = raw * paxFactor * bagFactor;
+  const minFare = PRICING.minimumFare[tier];
+  const total = Math.max(minFare, factored);
+
+  const quote = roundGBP(total);
+
+  res.json({
+    quote,
+    currency: PRICING.currency,
+    breakdown: {
+      tier,
+      passengers,
+      luggage,
+      base: roundGBP(base),
+      distanceKm,
+      distancePart: roundGBP(distancePart),
+      durationMin,
+      timePart: roundGBP(timePart),
+      extras: roundGBP(extras),
+      paxFactor: Number(paxFactor.toFixed(2)),
+      bagFactor: Number(bagFactor.toFixed(2)),
+      minimumFare: minFare,
+      total: quote,
+    },
+  });
 });
 
-// -------------------- SIMPLE BOOKINGS STORE --------------------
-// (File-based so you can test end-to-end without MongoDB)
 const BOOKINGS_FILE = path.join(__dirname, "bookings.json");
 
 function readBookings() {
   try {
     if (!fs.existsSync(BOOKINGS_FILE)) return [];
-    return JSON.parse(fs.readFileSync(BOOKINGS_FILE, "utf8"));
+    const raw = fs.readFileSync(BOOKINGS_FILE, "utf8");
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
 }
 
-function writeBookings(data) {
-  fs.writeFileSync(BOOKINGS_FILE, JSON.stringify(data, null, 2), "utf8");
+function writeBookings(items) {
+  fs.writeFileSync(BOOKINGS_FILE, JSON.stringify(items, null, 2), "utf8");
 }
 
-// POST /bookings
 app.post("/bookings", (req, res) => {
-  const {
-    pickup,
-    dropoff,
-    date,
-    time,
-    passengers,
-    luggage,
-    tier,
-    quote,
-  } = req.body || {};
+  const b = req.body || {};
+  const { pickup, dropoff, date, time, passengers, luggage, tier, quote, breakdown } = b;
 
-  if (
-    !pickup ||
-    !dropoff ||
-    !date ||
-    !time ||
-    typeof passengers !== "number" ||
-    typeof quote !== "number"
-  ) {
-    return res.status(400).json({
-      error: "Missing or invalid fields",
-    });
+  if (!pickup || !dropoff || !date || !time || typeof passengers !== "number" || typeof quote !== "number" || !tier) {
+    return res.status(400).json({ error: "Missing or invalid fields" });
   }
 
   const booking = {
@@ -106,6 +127,7 @@ app.post("/bookings", (req, res) => {
     luggage: typeof luggage === "number" ? luggage : 0,
     tier,
     quote,
+    breakdown: breakdown || null,
     status: "requested",
     createdAt: new Date().toISOString(),
   };
@@ -117,15 +139,12 @@ app.post("/bookings", (req, res) => {
   res.status(201).json({ id: booking.id, status: booking.status });
 });
 
-// GET /bookings (admin/testing)
 app.get("/bookings", (_req, res) => {
   res.json({ items: readBookings() });
 });
 
-// -------------------- Start server --------------------
 const PORT = process.env.PORT || 3000;
-
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`✅ Chauffeur backend running on port ${PORT}`);
 });
-
+EOF
